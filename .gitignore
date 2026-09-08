@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Options data - not redistributable, do not commit
+data/
+!data/sample/
+
+# Local figure output
+figures/*.png
