@@ -223,3 +223,4 @@ data/
 
 # Local figure output
 figures/*.png
+.vscode/
