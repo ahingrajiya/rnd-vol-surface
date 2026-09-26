@@ -20,3 +20,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*" = ["F401", "F841"]

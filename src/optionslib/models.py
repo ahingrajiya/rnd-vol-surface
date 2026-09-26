@@ -1,10 +1,12 @@
-from dataclasses import dataclass, field
-import numpy as np
+from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class GBMModel:
-    volatility : float
-    
+    volatility: float
+
     def __post_init__(self):
-        if self.volatility<=0:
-            raise ValueError(f'Volatility sigma must be positive, got {self.volatility}')
+        if self.volatility <= 0:
+            raise ValueError(
+                f"Volatility sigma must be positive, got {self.volatility}"
+            )
