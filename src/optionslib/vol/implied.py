@@ -294,6 +294,25 @@ def bounds_check(
 
 @dataclass(frozen=True)
 class SolverConfig:
+    """
+    Solver Config is dataclass for the root solver. It holds configurations for the solver. The detailed study regarding selections of s_lo and s_hi bounds can be
+    found in python notebook "notebook/01_bracket_bounds_exploration.ipynb"
+
+    Attributes:
+        s_lo (float): s_lo is the lower limit for the total volatility. s_lo is selected to be 0.05 where vega underflows. s_lo is purely numerical here but
+                    informative filter that depends on moneyness (|x|/s) lives in data layer.
+        s_hi (float): s_hi is the upper limit for the total volatility. s_hi is selected to be 5.0. The noise in s per one tick movement of quote is very noisy beyond s_hi =6.0
+                    and s_hi = 5.0 leaves some room.
+        epsilon (float): epsilon is a bound check for volatility interval because volatility bracket is open at both ends. epsilon does strict comparison against a bound
+                        that can only be approached asymptotically. Without epsilon this would be dominated by floating-point noise.
+        max_newton_iterations (int): max_newton_iterations is maximum number of iteration allowed to solve equation using Newton method which uses quadratic convergence.
+                                    Healthy quadratic convergence should occur in 4-5 iterations but max limit of 8 allows some headroom.
+        max_brent_iterations (int): max_brent_iterations is maximum iterations allowed for solving equation using Brent method. This is just a safety net as on
+                                    a valid bracket Brent is guaranteed to converge.
+        tolerance (float): tolerance is the root convergence tolerance. This will be explicitly passed to Brent method so both Newton and Brent Methods convergence mean the same.
+                            The value is set by the resolution of the quotes.
+    """
+
     s_lo: float = 0.05
     s_hi: float = 5.0
     epsilon: float = 1e-12
@@ -330,3 +349,67 @@ class SolverConfig:
             raise ValueError(
                 f"Lower bound for total implied vol needs to be smaller than upper bound, got lower bound = {self.s_lo} >= upper bound {self.s_hi}"
             )
+
+
+class BracketCheck(NamedTuple):
+    """
+    Bracket check of normalized price at s_lo and s_hi to see if it is within root bracket
+
+     Attributes:
+         b_lo : normalized price calculated at lower endpoint of bracket evaluated at s_lo
+         b_hi : normalized price calculated at upper endpoint of bracket evaluated at s_hi
+         reason: Reason for the failure or success
+
+    """
+
+    b_lo: float
+    b_hi: float
+    reason: Reason
+
+
+def bracket_check(
+    config: SolverConfig, x: float, call_or_put: int, b_target: float
+) -> BracketCheck:
+    """
+    Checks if the root falls within the bracket and returns of bracket along with reason for failure in case it fails. No-arb check, performed in
+    bounds_check has already passed and this check make sure the root lies within search interval.
+
+    Since the b is strictly increasing over entire range of s it is suffices to evaluate at the end points of the brackets.
+    Args:
+        config (SolverConfig): SolverConfig to access s_lo and s_hi
+        x (float): log moneyness
+        call_or_put (int): takes value +/-1 for call or put, respectively
+        b_target (float): targeted normalized price to compare b_lo and b_hi against
+    Returns:
+        BracketCheck: returns b_lo, b_hi (So brent method can use it) and reason for failure or success
+    """
+    b_lo = normalized_price(x, call_or_put, config.s_lo)
+    b_hi = normalized_price(x, call_or_put, config.s_hi)
+
+    if b_lo > b_target:
+        return BracketCheck(b_lo=b_lo, b_hi=b_hi, reason=Reason.ROOT_BELOW_BRACKET)
+    if b_hi < b_target:
+        return BracketCheck(b_lo=b_lo, b_hi=b_hi, reason=Reason.ROOT_ABOVE_BRACKET)
+    return BracketCheck(b_lo=b_lo, b_hi=b_hi, reason=Reason.OK)
+
+
+def initial_guess(
+    config: SolverConfig, x: float, call_or_put: int, b_target: float
+) -> float:
+
+    s_c = math.sqrt(2.0 * math.fabs(x))
+    b = normalized_price(x, call_or_put, s_c)
+    candidate = -1
+
+    if x == 0.0:
+        candidate = b_target * math.sqrt(2.0 * math.pi)
+    else:
+        s_c = math.sqrt(2.0 * math.fabs(x))
+        b = normalized_price(x, call_or_put, s_c)
+        if b_target < b:
+            candidate = s_c / 2.0
+        elif b_target > b:
+            candidate = (s_c + config.s_hi) / 2.0
+        else:
+            candidate = s_c
+    return min(max(candidate, config.s_lo), config.s_hi)
