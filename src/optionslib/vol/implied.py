@@ -4,6 +4,7 @@ from enum import StrEnum, auto
 from typing import Literal, NamedTuple
 
 import numpy as np
+from scipy.optimize import brentq
 from scipy.special import ndtr
 
 from optionslib.core import (
@@ -213,7 +214,7 @@ class Reason(StrEnum):
 
 class Method(StrEnum):
     """
-    Gives which method produced result
+    Gives the method that ran last
 
     Attributes:
         NEWTON : Newton Raphson method converged in given iteration cap
@@ -396,7 +397,28 @@ def bracket_check(
 def initial_guess(
     config: SolverConfig, x: float, call_or_put: int, b_target: float
 ) -> float:
+    """
+    Initial guess returns a starting guess for volatility to be used in Newton method. This starting guess is within bracket [s_lo,s_hi]. Total volatility
+    s_c = sqrt(2*abs(x)) is where normalized price (b) changes convexity (vega peaks there). Below s_c, b is convex in s and above s_c, concave. So, Newton method's
+    overshoot direction flips at s_c.
 
+    Starting on the same side as root gives monotone convergence. Comparing observed normalized price (b_target) with b
+    is the way to find which side we are on. There are three branches: root below s_c -> midpoint of [s_lo,s_c]; root above s_c -> midpoint of [s_c,s_hi];
+    exact equality -> s_c is the root.
+
+    Log moneyness x=0 is a special case because at x=0, s_c=0. There is no inflection to be on the wrong side of.
+    Second derivative is negative for all s>0 when x=0. The guess uses small-s linearization b = s/sqrt(2*pi). Hence s = b_target*sqrt(2*pi).
+    Result is clamped to [s_lo,s_hi].
+
+    Args:
+        config (SolverConfig): Solver configuration to access s_lo and s_hi
+        x (float): Log moneyness
+        call_or_put (int): takes value +/-1 for call or put, respectively
+        b_target (float): observed normalized price
+
+    Returns:
+        float: Initial guess for s to be used in the Newton method solver
+    """
     s_c = math.sqrt(2.0 * math.fabs(x))
     b = normalized_price(x, call_or_put, s_c)
     candidate = -1
@@ -413,3 +435,271 @@ def initial_guess(
         else:
             candidate = s_c
     return min(max(candidate, config.s_lo), config.s_hi)
+
+
+class NewtonExit(StrEnum):
+    """
+    Gives reason for the exit of Newton method
+
+    Attributes:
+        CONVERGED : Solver converged.
+        LEFT_BRACKET : Steps outside [s_lo, s_hi] range
+        MAX_ITERATIONS : Reached maximum iterations allowed for Newton method (reached config.max_newton_iterations)
+        ZERO_VEGA : Vega underflowed to exactly zero, so Newton step is undefined
+    """
+
+    @staticmethod
+    def _generate_next_value_(
+        name: str, start: int, count: int, last_values: list[str]
+    ) -> str:
+        return name
+
+    CONVERGED = auto()
+    LEFT_BRACKET = auto()
+    MAX_ITERATIONS = auto()
+    ZERO_VEGA = auto()
+
+
+class NewtonResult(NamedTuple):
+    """
+    Newton method result. It holds last value of total volatility, number of iterations, and reason for Newton exit.
+
+    Attributes:
+         s : last calculated value of total volatility in Newton method
+         iterations : number of iterations taken by Newton method
+         exit_reason : reason for exiting Newton method
+
+    """
+
+    s: float
+    iterations: int
+    exit_reason: NewtonExit
+
+
+def newton_method(
+    config: SolverConfig, x: float, call_or_put: int, b_target: float, s_initial: float
+) -> NewtonResult:
+    """
+    Newton method solves for total volatility from the analytical vega. The step uses analytical vega rather than finite difference , which would put a numerical
+    derivative of a numerically-computed price inside a root finder. It returns named tuple.
+
+    Vega is strictly positive mathematically but underflows to exactly zero in floating point. In case vega underflows in the flat regimes and step is undefined.
+    Brent method will find solution without need of derivative. Convergence is tested on |delta s| against the config.tolerance
+
+    The function has four exits
+        1. If solution converges then it returns converged solution of s, number of iterations taken to solve it and exit reason as CONVERGED
+        2. If vega is zero then it will return current iterate of s, number of completed iterations and exit reason as ZERO_VEGA. Brent will take over from Newton.
+        3. If for a given step new guess of s is outside the bracket [s_lo,s_hi] it will return previous value of s, number of iterations taken and exit reason as
+        LEFT_BRACKET. Out of bracket value carries no information, so the last in-bracket iterate is returned. Brent will take over from Newton.
+        4. If after maximum number of allowed iterations solver does not converge it will return last guess for s, maximum number of iterations allowed for Newton
+        method and exit reason as MAX_ITERATIONS. Brent will take over from Newton.
+
+
+    Args:
+        config (SolverConfig): Solver configuration
+        x (float): Log moneyness
+        call_or_put (int): takes value +/-1 for call or put, respectively
+        b_target (float): observed normalized price
+        s_initial (float): initial guess for s
+
+    Returns:
+        NewtonResult: NamedTuple containing value of s, number of iterations and exit reason
+    """
+    s = s_initial
+    for iterations in range(1, 1 + config.max_newton_iterations):
+        b = normalized_price(x, call_or_put, s)
+        v = normalized_vega(x, call_or_put, s)
+        if v == 0.0:
+            return NewtonResult(s, iterations - 1, NewtonExit.ZERO_VEGA)
+        step = (b - b_target) / v
+        s_new = s - step
+        if s_new < config.s_lo or s_new > config.s_hi:
+            return NewtonResult(s, iterations, NewtonExit.LEFT_BRACKET)
+        if math.fabs(step) < config.tolerance:
+            return NewtonResult(s_new, iterations, NewtonExit.CONVERGED)
+        s = s_new
+    return NewtonResult(s, config.max_newton_iterations, NewtonExit.MAX_ITERATIONS)
+
+
+class BrentExit(StrEnum):
+    """
+    Gives reason for the exit of Brent method. There is no bracket check failure as bracket_check guarantees a valid bracket and brentq requires opposite signs at
+    the endpoints which is already established before method runs.
+
+    Attributes:
+        CONVERGED : Solver converged.
+        MAX_ITERATIONS : Reached maximum iterations allowed for Brent method (reached config.max_brent_iterations)
+    """
+
+    @staticmethod
+    def _generate_next_value_(
+        name: str, start: int, count: int, last_values: list[str]
+    ) -> str:
+        return name
+
+    CONVERGED = auto()
+    MAX_ITERATIONS = auto()
+
+
+class BrentResult(NamedTuple):
+    """
+    Brent method result. It holds last value of total volatility, number of iterations, and reason for Brent exit.
+
+    Attributes:
+         s : last calculated value of total volatility in brent method
+         iterations : number of iterations taken by Brent method
+         exit_reason : reason for exiting Brent method
+
+    """
+
+    s: float
+    iterations: int
+    exit_reason: BrentExit
+
+
+def brent_method(
+    config: SolverConfig,
+    x: float,
+    call_or_put: int,
+    b_target: float,
+    b_lo: float,
+    b_hi: float,
+) -> BrentResult:
+    """
+    Brent method finds the root such that normalized price equals target. This method is bracketing root-finder and does not rely on derivative.
+
+    This is a fallback method. If Newton method fails to find the root in the flat-vega regimes (deep ITM/OTM), where step is undefined or overshoots then
+    Brent method will take over as it does not require derivative and handles exactly the cases Newton method cannot. Brent method works from the bracket
+    alone without initial guess.
+
+    The objective is a closure over log moneyness, call or put and b_target, returning b(s)-b_target. b_lo and b_hi come from bracket_check and are passed in rather
+    than recomputed.
+
+    Sign guard:
+        The bracket is checked here, before calling brentq, because scipy raises a plain ValueError for a same-sign bracket; indistinguishable from the
+        ValueError normalized_price raises for s <= 0. Checking first keeps the diagnosis truthful, and means any escaping ValueError is a genuine bug.
+        With bracket_check having passed, this guard should never fire.
+
+    We pass tolerance explicitly so Newton method and Brent method mean the same thing by converged. This tolerance is xtol = config.tolerance. rtol is left
+    at scipy's default as it contributes 1e-15 for s of order 1, which is negligible against 1e-8
+
+    The function has three exits:
+        1. If the bracket check fails then the function will raise ValueError. Since bracket check is already passed this exit should never fire
+        2. If the solution did not converge then the function will return value of s where search stopped, maximum number of iterations taken and exit as
+        MAX_ITERATIONS.
+        3. If the solution is converged then function will return value of s, number of iterations taken and exit as CONVERGED.
+
+    Args:
+        config (SolverConfig): solver configuration
+        x (float): Log moneyness
+        call_or_put (int): takes value +/-1 for call or put, respectively
+        b_target (float): observed normalized price
+        b_lo (float): normalized price calculated at lower endpoint of bracket evaluated at s_lo
+        b_hi (float): normalized price calculated at upper endpoint of bracket evaluated at s_hi
+
+    Returns:
+        BrentResult: Returns the value of s, number of iterations taken and reason for failure or success.
+    """
+
+    def objective(s: float) -> float:
+        return normalized_price(x, call_or_put, s) - b_target
+
+    f_lo = b_lo - b_target
+    f_hi = b_hi - b_target
+
+    if f_lo * f_hi > 0.0:
+        raise ValueError(
+            f"Bracket endpoints have the same sign: f(s_lo)={f_lo}, f(s_hi)={f_hi}. "
+            "bracket_check should have made this impossible."
+        )
+
+    root, results = brentq(
+        objective,
+        config.s_lo,
+        config.s_hi,
+        xtol=config.tolerance,
+        maxiter=config.max_brent_iterations,
+        full_output=True,
+        disp=False,
+    )
+
+    if not results.converged:
+        return BrentResult(root, results.iterations, BrentExit.MAX_ITERATIONS)
+
+    return BrentResult(root, results.iterations, BrentExit.CONVERGED)
+
+
+def implied_vol(
+    problem: NormalizedProblem, price: float, config: SolverConfig = SolverConfig()
+) -> ImpliedVolResult:
+    """
+    The function inverts the quoted price for implied volatility, one contract at a time.
+
+    Pipeline:
+        calculate normalized price -> check if no arbitrage bounds are satisfied -> check if target price falls with in price bracket of [b_lo,b_hi] -> initial
+        guess for total volatility -> Use Newton method to find root -> if Newton method fails then use Brent as fallback
+
+    Args:
+        problem (NormalizedProblem): normalized problem
+        price (float): price of the quoted contract in dollar term
+        config (SolverConfig, optional): solver configuration. Defaults to SolverConfig().
+
+    Returns:
+        ImpliedVolResult: returns implied volatility result
+    """
+    b_target = price / problem.normalization_factor
+    bounds = normalized_bounds(problem.x, problem.call_or_put)
+    bounds_reason = bounds_check(b_target, bounds.floor, bounds.ceiling)
+    if bounds_reason != Reason.OK:
+        return ImpliedVolResult(
+            reason=bounds_reason,
+            x=problem.x,
+            floor=bounds.floor,
+            ceiling=bounds.ceiling,
+        )
+    brackets = bracket_check(config, problem.x, problem.call_or_put, b_target)
+    if brackets.reason != Reason.OK:
+        return ImpliedVolResult(
+            reason=brackets.reason,
+            x=problem.x,
+            floor=bounds.floor,
+            ceiling=bounds.ceiling,
+        )
+    s_initial = initial_guess(config, problem.x, problem.call_or_put, b_target)
+    newton_result = newton_method(
+        config, problem.x, problem.call_or_put, b_target, s_initial
+    )
+    if newton_result.exit_reason == NewtonExit.CONVERGED:
+        return ImpliedVolResult(
+            reason=Reason.OK,
+            x=problem.x,
+            floor=bounds.floor,
+            ceiling=bounds.ceiling,
+            sigma=newton_result.s / problem.sqrt_T,
+            method=Method.NEWTON,
+            s=newton_result.s,
+            iterations=newton_result.iterations,
+        )
+    brent_result = brent_method(
+        config, problem.x, problem.call_or_put, b_target, brackets.b_lo, brackets.b_hi
+    )
+    if brent_result.exit_reason == BrentExit.CONVERGED:
+        return ImpliedVolResult(
+            reason=Reason.OK,
+            x=problem.x,
+            floor=bounds.floor,
+            ceiling=bounds.ceiling,
+            sigma=brent_result.s / problem.sqrt_T,
+            method=Method.BRENT,
+            s=brent_result.s,
+            iterations=newton_result.iterations + brent_result.iterations,
+        )
+    return ImpliedVolResult(
+        reason=Reason.NO_CONVERGENCE,
+        x=problem.x,
+        floor=bounds.floor,
+        ceiling=bounds.ceiling,
+        method=Method.BRENT,
+        s=brent_result.s,
+        iterations=newton_result.iterations + brent_result.iterations,
+    )
