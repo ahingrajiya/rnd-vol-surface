@@ -1,3 +1,21 @@
+"""
+Implied volatility solver: inverts a quoted option price for the volatility that reproduces it.
+
+Works in normalized coordinates throughout: x = ln(F/K) (log-moneyness), s = sigma*sqrt(T) (total volatility), and b = V/(D*sqrt(F*K)) (normalized price). Five inputs collapse
+to two because sigma and T enter the price only through s, and F and K only through their ratio and geometric mean, with D*sqrt(F*K) as an overall scale. The normalization follows
+Jaeckel, "Let's Be Rational" (2015). The regime-specific transforms and rational initial guess from that paper are not implemented here: a surface fit needs correct implied
+vols rather than the fastest possible ones, and Newton with a Brent fallback under this normalization is accurate enough and simpler to defend.
+
+implied_vol is the public entry point and the single dollars-to-normalized crossing; everything below it works in (x, s, b). The remaining functions are achinery, exposed for
+testing rather than for use.
+
+Solves one contract at a time. Chain-level iteration belongs in the calibration layer, because per-contract convergence and the Newton-to-Brent fallback do not vectorize cleanly.
+Being scalar by design, this module uses math rather than numpy; analytic.py is closed-form and array-safe and uses numpy throughout.
+
+Two argument conventions: the pure math functions (normalized_bounds, normalized_price, normalized_vega) take unpacked floats, while the solver machinery takes objects
+(NormalizedProblem, SolverConfig).
+"""
+
 import math
 from dataclasses import dataclass
 from enum import StrEnum, auto
@@ -629,23 +647,72 @@ def brent_method(
     return BrentResult(root, results.iterations, BrentExit.CONVERGED)
 
 
+DEFAULT_CONFIG = SolverConfig()
+
+
 def implied_vol(
-    problem: NormalizedProblem, price: float, config: SolverConfig = SolverConfig()
+    problem: NormalizedProblem, price: float, config: SolverConfig = DEFAULT_CONFIG
 ) -> ImpliedVolResult:
     """
     The function inverts the quoted price for implied volatility, one contract at a time.
 
     Pipeline:
-        calculate normalized price -> check if no arbitrage bounds are satisfied -> check if target price falls with in price bracket of [b_lo,b_hi] -> initial
-        guess for total volatility -> Use Newton method to find root -> if Newton method fails then use Brent as fallback
+        calculate normalized price -> check if no arbitrage bounds are satisfied -> check if target price falls within price bracket of [b_lo,b_hi] -> initial
+        guess for total volatility -> Use Newton method to find root -> if Newton method fails then use Brent as fallback-> Denormalize volatility
+
+    This is the single dollars-to-normalized crossing in the module; everything below it works in (x, s, b).
+
+    Exits:
+        1. If bound checks and bracket checks qualify and solution converges :
+            - reason = OK
+            - floor = NormalizedBound floor
+            - ceiling = NormalizedBound ceiling
+            - sigma = s/sqrt(T)
+            - method = NEWTON or BRENT (if Newton failed to converge)
+            - s = root solution from Newton or Brent (if Newton failed to converge)
+            - iterations = total number of iterations = Newton + Brent. Brent=0 if Newton converged
+            - conclusion = volatility solution exists
+        2. If bound checks and bracket checks qualify but solution does not converge :
+            - reason = NO_CONVERGENCE
+            - floor = NormalizedBound floor
+            - ceiling = NormalizedBound ceiling
+            - sigma = NaN
+            - method = BRENT
+            - s = last iterate from Brent. inside the bracket but not root
+            - iterations = total number of iterations = Newton + Brent before convergence failure
+            - conclusion = volatility solution could not be found in given number of iterations
+        3. If bound checks fail :
+            - reason = ABOVE_CEILING or BELOW_FLOOR
+            - floor = NormalizedBound floor
+            - ceiling = NormalizedBound ceiling
+            - sigma = NaN
+            - method = NONE
+            - s = NaN
+            - iterations = 0
+            - conclusion = quote violates the no-arbitrage condition. quote must be rejected.
+        4. If bracket checks fail :
+            - reason = ROOT_ABOVE_BRACKET or ROOT_BELOW_BRACKET
+            - floor = NormalizedBound floor
+            - ceiling = NormalizedBound ceiling
+            - sigma = NaN
+            - method = NONE
+            - s = NaN
+            - iterations = 0
+            - conclusion = root is outside volatility bracket. widen the bracket.
 
     Args:
         problem (NormalizedProblem): normalized problem
         price (float): price of the quoted contract in dollar term
-        config (SolverConfig, optional): solver configuration. Defaults to SolverConfig().
+        config (SolverConfig, optional): solver configuration. Defaults to SolverConfig(). Note that this is safe despite being mutable-default-looking-patterN
+            because the dataclass is frozen.
 
     Returns:
         ImpliedVolResult: returns implied volatility result
+
+    Raises:
+        ValueError: brent_method raises ValueError if the bracket endpoints have the same sign when Brent is reached. bracket_check makes this impossible, so it indicates a bug
+            rather than a bad quote.
+
     """
     b_target = price / problem.normalization_factor
     bounds = normalized_bounds(problem.x, problem.call_or_put)
