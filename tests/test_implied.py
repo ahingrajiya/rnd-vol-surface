@@ -12,6 +12,7 @@ from optionslib.vol.implied import (
     Method,
     NormalizedProblem,
     Reason,
+    SolverConfig,
     bracket_check,
     brent_method,
     implied_vol,
@@ -430,6 +431,8 @@ def test_root_below_bracket(S, K, r, q, call_or_put, sigma, T):
     """
     Prices are constructed using Black Scholes but implied volatility is well outside the range of [0.05,5.0]
     """
+    cfg = SolverConfig(s_lo=0.1)
+
     model = GBMModel(sigma)
     payoff = Payoff(K, call_or_put)
     curve = FlatDiscountCurve(r)
@@ -437,7 +440,7 @@ def test_root_below_bracket(S, K, r, q, call_or_put, sigma, T):
     market = Market(S, curve, dividend)
     result = black_scholes(payoff, model, market, T)
     norm_problem = NormalizedProblem.from_market(payoff, market, T)
-    iv_result = implied_vol(norm_problem, result.price)
+    iv_result = implied_vol(norm_problem, result.price, cfg)
 
     assert iv_result.reason == Reason.ROOT_BELOW_BRACKET
     assert math.isnan(iv_result.sigma)

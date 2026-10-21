@@ -318,8 +318,11 @@ class SolverConfig:
     found in python notebook "notebook/01_bracket_bounds_exploration.ipynb"
 
     Attributes:
-        s_lo (float): s_lo is the lower limit for the total volatility. s_lo is selected to be 0.05 where vega underflows. s_lo is purely numerical here but
-                    informative filter that depends on moneyness (|x|/s) lives in data layer.
+        s_lo (float): Lower endpoint of the root bracket, in total volatility. This is a finiteness guard rather than a filter: its only jobs are to
+                    keep normalized_price off s <= 0 and to give Brent a finite left endpoint. Set to 1e-4, two orders of magnitude below the smallest s
+                    among cleanly solved vendor quotes (0.0139), so it never binds on real data. The genuine lower-side constraint is not a floor on s but
+                    a ratio: b underflows to zero once |x|/s exceeds roughly 37.7, andt hat condition is applied in the data layer, after inversion, where
+                    the returned s is known. Consequently ROOT_BELOW_BRACKET is effectively unreachable in production and is kept as a guard.
         s_hi (float): s_hi is the upper limit for the total volatility. s_hi is selected to be 5.0. The noise in s per one tick movement of quote is very noisy beyond s_hi =6.0
                     and s_hi = 5.0 leaves some room.
         epsilon (float): epsilon is a bound check for volatility interval because volatility bracket is open at both ends. epsilon does strict comparison against a bound
@@ -332,7 +335,7 @@ class SolverConfig:
                             The value is set by the resolution of the quotes.
     """
 
-    s_lo: float = 0.05
+    s_lo: float = 1e-4
     s_hi: float = 5.0
     epsilon: float = 1e-12
     max_newton_iterations: int = 8
