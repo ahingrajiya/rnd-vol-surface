@@ -412,46 +412,48 @@ def bracket_check(
     return BracketCheck(b_lo=b_lo, b_hi=b_hi, reason=Reason.OK)
 
 
+# Initial-guess constants, chosen from the sweep in notebooks/03_initial_guess.ipynb. Below ATM_THRESHOLD the small-s linearization b ~ s/sqrt(2pi) holds;
+# above it, s_c sets the scale.
+ATM_THRESHOLD = 0.5
+S_C_MULTIPLIER = 1.5
+
+
 def initial_guess(
     config: SolverConfig, x: float, call_or_put: int, b_target: float
 ) -> float:
     """
-    Initial guess returns a starting guess for volatility to be used in Newton method. This starting guess is within bracket [s_lo,s_hi]. Total volatility
-    s_c = sqrt(2*abs(x)) is where normalized price (b) changes convexity (vega peaks there). Below s_c, b is convex in s and above s_c, concave. So, Newton method's
-    overshoot direction flips at s_c.
+     Returns a starting value for the Newton iteration, clamped to [s_lo, s_hi].
 
-    Starting on the same side as root gives monotone convergence. Comparing observed normalized price (b_target) with b
-    is the way to find which side we are on. There are three branches: root below s_c -> midpoint of [s_lo,s_c]; root above s_c -> midpoint of [s_c,s_hi];
-    exact equality -> s_c is the root.
+    Two approximations are used, each in the regime where it is valid. Near the money, b is approximately s/sqrt(2*pi) for small s, so s = b_target*sqrt(2*pi)
+    estimates the root directly from the observed price. Away from the money that linearization breaks down, because b is then dominated by intrinsic value and
+    carries little information about s; there the guess is scaled from s_c = sqrt(2*|x|), the total volatility at which vega peaks for that moneyness.
+    ATM_THRESHOLD separates the two regimes.
 
-    Log moneyness x=0 is a special case because at x=0, s_c=0. There is no inflection to be on the wrong side of.
-    Second derivative is negative for all s>0 when x=0. The guess uses small-s linearization b = s/sqrt(2*pi). Hence s = b_target*sqrt(2*pi).
-    Result is clamped to [s_lo,s_hi].
+    Note that s_c is used here only to set a scale. An earlier version used it to decide which side of the convexity change (b is convex in s below s_c, concave
+    above) the root lay on, and started from a midpoint of the corresponding sub-interval. That guess anchored on s_hi rather than on the contract and
+    diverged on the first Newton step whenever the root was well below it.
+
+    No special case is needed at x = 0, where s_c = 0: the linearization branch covers it, and the two branches agree continuously as x -> 0.
+
+    A poor guess is not fatal, since Newton reports LEFT_BRACKET or MAX_ITERATIONS and Brent takes over. The aim is for the fallback to fire rarely, so that
+    Newton earns its place in the design.
+
+    See notebooks/03_initial_guess.ipynb for the sweep behind ATM_THRESHOLD and S_C_MULTIPLIER.
 
     Args:
-        config (SolverConfig): Solver configuration to access s_lo and s_hi
-        x (float): Log moneyness
+        config (SolverConfig): solver configuration, for the bracket [s_lo, s_hi]
+        x (float): log moneyness
         call_or_put (int): takes value +/-1 for call or put, respectively
         b_target (float): observed normalized price
 
     Returns:
-        float: Initial guess for s to be used in the Newton method solver
+        float: initial guess for s, clamped to [s_lo, s_hi]
     """
-    s_c = math.sqrt(2.0 * math.fabs(x))
-    b = normalized_price(x, call_or_put, s_c)
-    candidate = -1
-
-    if x == 0.0:
+    del call_or_put
+    if abs(x) < ATM_THRESHOLD:
         candidate = b_target * math.sqrt(2.0 * math.pi)
     else:
-        s_c = math.sqrt(2.0 * math.fabs(x))
-        b = normalized_price(x, call_or_put, s_c)
-        if b_target < b:
-            candidate = s_c / 2.0
-        elif b_target > b:
-            candidate = (s_c + config.s_hi) / 2.0
-        else:
-            candidate = s_c
+        candidate = S_C_MULTIPLIER * math.sqrt(2.0 * math.fabs(x))
     return min(max(candidate, config.s_lo), config.s_hi)
 
 
