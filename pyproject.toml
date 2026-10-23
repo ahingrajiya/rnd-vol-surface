@@ -13,7 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov"]
+# The options-chain data layer (optionslib.chain) needs pandas; the pricing core and solver do not.
+# pyarrow is only for writing results to Parquet.
+chain = ["pandas>=2.0", "pyarrow"]
+dev = ["pytest", "pytest-cov", "pandas>=2.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
