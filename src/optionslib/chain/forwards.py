@@ -108,7 +108,11 @@ class ForwardFit(NamedTuple):
         status: ForwardStatus
         D: discount factor (NaN unless a fit was produced)
         F: forward price
-        se_D, se_F: standard errors from the weighted fit; se_F by the delta method on F = -a/b
+        se_D, se_F: standard errors from the weighted fit; se_F by the delta method on F = -a/b.
+            These assume errors independent across strikes. Quotes in one expiry share errors (a
+            common quoting model, a common snapshot time), so on real data they are lower bounds:
+            on 2022-07-01 the implied rate scatters between neighbouring short expiries by several
+            times se_r.
         n_pairs: pairs used in the final fit
         n_dropped: pairs removed by backward elimination
         resid_scale: weighted residual standard deviation, in units of combined half-spread
@@ -238,9 +242,10 @@ def fit_forwards(
     Returns:
         pd.DataFrame with one row per bucket: the bucket keys, T, settlement_time, spot, every
         ForwardFit field, and the implied rate r, its standard error se_r and the carry q as
-        diagnostics. At very short T, D is barely distinguishable from 1, so r = -ln(D)/T is noisy
-        (se_r of several percent at a few days) - harmless for pricing, since an error dD moves the
-        option price by only dD/D, but worth knowing before reading the short end of the rate curve.
+        diagnostics. At short T, D is barely distinguishable from 1, so r = -ln(D)/T is noisy, and
+        more so than se_r says (see ForwardFit on why it is a lower bound). This is nearly harmless
+        for pricing - an error dD moves an at-the-money price by only dD/D, about 0.007 vol points for
+        a 50 bp rate error at three weeks - but read the short end of the rate curve with care.
     """
     usable = chain[chain["quote_status"] == QuoteStatus.OK]
     cols = ["mid", "half_spread"]

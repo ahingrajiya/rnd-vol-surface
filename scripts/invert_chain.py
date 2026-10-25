@@ -176,7 +176,8 @@ def main() -> int:
             ].to_string(index=False, float_format=lambda v: f"{v:.3f}")
         )
         print(
-            "  (r at the shortest expiries is noisy: D is barely distinguishable from 1 there. See se_r.)"
+            "  (r is noisy at the shortest expiries, where D is barely distinguishable from 1;"
+            " se_r assumes independent errors across strikes and is a lower bound.)"
         )
     print()
 
