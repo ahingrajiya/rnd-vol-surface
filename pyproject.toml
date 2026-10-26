@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "optionslib"
 version = "0.1.0"
-description = "Options pricing library with cross-validated analytic, tree, PDE and Monte Carlo engines"
+description = "Black-Scholes pricing, an implied volatility solver and options-chain tooling for risk-neutral density extraction from SPX options"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
